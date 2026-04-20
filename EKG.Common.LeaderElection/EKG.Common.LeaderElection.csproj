@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>EKG.Common.LeaderElection</PackageId>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>EKG.Common.LeaderElection.Tests.Unit</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DynamicProxyGenAssembly2</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="EKG.Common.Cache.Redis" Version="1.0.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.*" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.*" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.*" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.*" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="EKG.Common.LeaderElection/EKG.Common.LeaderElection.csproj" />
+  <Project Path="EKG.Common.LeaderElection.Sample/EKG.Common.LeaderElection.Sample.csproj" />
+  <Project Path="EKG.Common.LeaderElection.Tests.Unit/EKG.Common.LeaderElection.Tests.Unit.csproj" />
+  <Project Path="EKG.Common.LeaderElection.Tests.E2E/EKG.Common.LeaderElection.Tests.E2E.csproj" />
+</Solution>

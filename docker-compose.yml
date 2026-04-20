@@ -1,0 +1,39 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  sample-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: le-sample:local
+    ports:
+      - "5020:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      Redis__ConnectionString: redis://redis:6379
+      LeaderElection__AppName: EKG.Common.LeaderElection.Sample
+      LeaderElection__TtlSeconds: "15"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sample-2:
+    image: le-sample:local
+    ports:
+      - "5021:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      Redis__ConnectionString: redis://redis:6379
+      LeaderElection__AppName: EKG.Common.LeaderElection.Sample
+      LeaderElection__TtlSeconds: "15"
+    depends_on:
+      - sample-1

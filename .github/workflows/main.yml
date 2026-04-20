@@ -1,0 +1,35 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4.3.1
+        with:
+          dotnet-version: '10.x'
+
+      - name: Pack library
+        run: |
+          csproj="EKG.Common.LeaderElection/EKG.Common.LeaderElection.csproj"
+          VERSION=$(grep -oP '(?<=<Version>)[^<]+' "$csproj" | head -1)
+          MAJOR_MINOR=$(echo $VERSION | cut -d'.' -f1,2)
+          echo "Packing $csproj as version $MAJOR_MINOR.${{ github.run_number }}"
+          dotnet pack "$csproj" --configuration Release /p:Version=$MAJOR_MINOR.${{ github.run_number }}
+
+      - name: Publish package
+        run: dotnet nuget push **/*.nupkg --source "https://nuget.pkg.github.com/evgenkovalenko/index.json" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate

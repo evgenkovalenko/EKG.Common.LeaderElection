@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "EKG.Common.LeaderElection.Sample": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:56888;http://localhost:56889"
+    }
+  }
+}

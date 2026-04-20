@@ -15,6 +15,9 @@ public class LeaderElectionService : BackgroundService, ILeaderElectionService
     public bool IsLeader => _isLeader;
     public Guid InstanceId { get; } = Guid.NewGuid();
 
+    public event EventHandler<LeadershipAcquiredEventArgs>? LeadershipAcquired;
+    public event EventHandler<LeadershipReleasedEventArgs>? LeadershipReleased;
+
     private string Key => $"leader-election:{_options.AppName}";
 
     internal LeaderElectionService(
@@ -54,6 +57,8 @@ public class LeaderElectionService : BackgroundService, ILeaderElectionService
                 return;
             }
 
+            var wasLeader = _isLeader;
+
             var newState = new LeaderElectionState
             {
                 HolderId = InstanceId,
@@ -69,15 +74,44 @@ public class LeaderElectionService : BackgroundService, ILeaderElectionService
                 _logger.LogInformation(
                     "LeaderElection: instance {InstanceId} acquired leadership for {AppName}. TransitionCount={TransitionCount}",
                     InstanceId, _options.AppName, newState.TransitionCount);
+                RaiseLeadershipAcquired(newState.TransitionCount);
             }
             else
             {
                 _isLeader = false;
+                if (wasLeader)
+                {
+                    _logger.LogWarning(
+                        "LeaderElection: instance {InstanceId} lost leadership for {AppName} — displaced by another instance",
+                        InstanceId, _options.AppName);
+                    RaiseLeadershipReleased(LeadershipReleasedReason.Displaced);
+                }
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "LeaderElection: Redis error during election loop for {AppName}", _options.AppName);
+        }
+    }
+
+    public async Task DemoteLeadershipAsync()
+    {
+        if (!_isLeader)
+            return;
+
+        try
+        {
+            await _redis.ReleaseAsync(Key);
+            _isLeader = false;
+            _logger.LogInformation(
+                "LeaderElection: instance {InstanceId} demoted from leadership for {AppName}",
+                InstanceId, _options.AppName);
+            RaiseLeadershipReleased(LeadershipReleasedReason.Demoted);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "LeaderElection: failed to demote leadership for {AppName}", _options.AppName);
+            throw;
         }
     }
 
@@ -93,10 +127,31 @@ public class LeaderElectionService : BackgroundService, ILeaderElectionService
             _logger.LogInformation(
                 "LeaderElection: instance {InstanceId} released leadership for {AppName} on shutdown",
                 InstanceId, _options.AppName);
+            RaiseLeadershipReleased(LeadershipReleasedReason.Shutdown);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "LeaderElection: failed to release lock on shutdown for {AppName}", _options.AppName);
         }
+    }
+
+    private void RaiseLeadershipAcquired(int transitionCount)
+    {
+        LeadershipAcquired?.Invoke(this, new LeadershipAcquiredEventArgs
+        {
+            InstanceId = InstanceId,
+            AppName = _options.AppName,
+            TransitionCount = transitionCount,
+        });
+    }
+
+    private void RaiseLeadershipReleased(LeadershipReleasedReason reason)
+    {
+        LeadershipReleased?.Invoke(this, new LeadershipReleasedEventArgs
+        {
+            InstanceId = InstanceId,
+            AppName = _options.AppName,
+            Reason = reason,
+        });
     }
 }

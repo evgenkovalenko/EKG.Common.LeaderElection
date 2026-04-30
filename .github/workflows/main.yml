@@ -23,11 +23,6 @@ jobs:
         with:
           dotnet-version: '10.x'
 
-      - name: Add GitHub NuGet source
-        run: |
-          dotnet nuget remove source github 2>/dev/null || true
-          dotnet nuget add source "https://nuget.pkg.github.com/evgenkovalenko/index.json" --name github --username evgenkovalenko --password ${{ secrets.NUGET_READ_TOKEN }} --store-password-in-clear-text
-
       - name: Pack library
         run: |
           csproj="EKG.Common.LeaderElection/EKG.Common.LeaderElection.csproj"

@@ -22,24 +22,9 @@ jobs:
         uses: actions/setup-dotnet@v4.3.1
         with:
           dotnet-version: '10.x'
-
-      - name: Create NuGet config
-        run: |
-          cat > nuget.config << EOF
-          <?xml version="1.0" encoding="utf-8"?>
-          <configuration>
-            <packageSources>
-              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-              <add key="github" value="https://nuget.pkg.github.com/evgenkovalenko/index.json" />
-            </packageSources>
-            <packageSourceCredentials>
-              <github>
-                <add key="Username" value="${{ github.actor }}" />
-                <add key="ClearTextPassword" value="${{ secrets.GITHUB_TOKEN }}" />
-              </github>
-            </packageSourceCredentials>
-          </configuration>
-          EOF
+          source-url: https://nuget.pkg.github.com/evgenkovalenko/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pack library
         run: |

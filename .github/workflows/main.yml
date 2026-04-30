@@ -25,7 +25,7 @@ jobs:
 
       - name: Create NuGet config
         run: |
-          cat > nuget.config << 'EOF'
+          cat > nuget.config << EOF
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
             <packageSources>
@@ -34,8 +34,8 @@ jobs:
             </packageSources>
             <packageSourceCredentials>
               <github>
-                <add key="Username" value="evgenkovalenko" />
-                <add key="ClearTextPassword" value="${{ secrets.NUGET_READ_TOKEN }}" />
+                <add key="Username" value="${{ github.actor }}" />
+                <add key="ClearTextPassword" value="${{ secrets.GITHUB_TOKEN }}" />
               </github>
             </packageSourceCredentials>
           </configuration>

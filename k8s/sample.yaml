@@ -1,0 +1,84 @@
+# The E2E bench (PRM-78 plan D9): two sample replicas competing for Lease "le-sample" in namespace
+# leader-election-e2e. Deployed by the Tiltfile, to a kind cluster only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: leader-election-e2e
+---
+# What every service using EKG.Common.LeaderElection 2.0 needs: its own ServiceAccount with get / create / update on
+# Leases in its namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: le-sample
+  namespace: leader-election-e2e
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: le-sample-leases
+  namespace: leader-election-e2e
+rules:
+  - apiGroups: ['coordination.k8s.io']
+    resources: ['leases']
+    verbs: ['get', 'create', 'update']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: le-sample-leases
+  namespace: leader-election-e2e
+subjects:
+  - kind: ServiceAccount
+    name: le-sample
+    namespace: leader-election-e2e
+roleRef:
+  kind: Role
+  name: le-sample-leases
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: le-sample
+  namespace: leader-election-e2e
+  labels:
+    app: le-sample
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: le-sample
+  template:
+    metadata:
+      labels:
+        app: le-sample
+    spec:
+      serviceAccountName: le-sample
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: sample
+          image: le-sample
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://+:8080
+            - name: LeaderElection__LockName
+              value: le-sample
+            # Faster than the defaults so the tests run quickly: lease = max(1 × 2.5, (1 + 1 + 3 + 2) × 1.5) = 10.5 s.
+            - name: LeaderElection__RenewalPeriod
+              value: "00:00:01"
+            - name: LeaderElection__RenewalTimeout
+              value: "00:00:03"
+            - name: LeaderElection__HealthCheckTimeout
+              value: "00:00:01"
+            - name: LeaderElection__LeaderDemotionHandlerTimeout
+              value: "00:00:02"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2

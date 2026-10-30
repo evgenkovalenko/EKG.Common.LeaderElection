@@ -1,0 +1,32 @@
+name: Build and test
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4.3.1
+        with:
+          dotnet-version: '10.x'
+
+      # The E2E project needs a kind cluster (see README); CI runs the library and its unit tests.
+      - name: Build
+        run: |
+          dotnet build EKG.Common.LeaderElection/EKG.Common.LeaderElection.csproj --configuration Release
+          dotnet build EKG.Common.LeaderElection.Sample/EKG.Common.LeaderElection.Sample.csproj --configuration Release
+
+      - name: Unit tests
+        run: dotnet test EKG.Common.LeaderElection.Tests.Unit --configuration Release --logger "console;verbosity=normal"

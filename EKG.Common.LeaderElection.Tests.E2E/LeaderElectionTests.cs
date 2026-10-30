@@ -1,99 +1,83 @@
-using EKG.Common.LeaderElection.Tests.E2E.Infrastructure;
-using Polly;
+using k8s;
+using k8s.Models;
 
 namespace EKG.Common.LeaderElection.Tests.E2E;
 
-[Collection("DockerCompose")]
-public class LeaderElectionTests
+[CollectionDefinition("Sample", DisableParallelization = true)]
+public sealed class SampleCollection : ICollectionFixture<SampleCluster>;
+
+// PRM-78 plan D9, against the kind bench (Tiltfile): two sample pods, one Lease. The tests change who leads, so they run
+// one after another and each starts from a settled state.
+[Collection("Sample")]
+public class LeaderElectionTests(SampleCluster cluster)
 {
-    private readonly SampleClient _instance1 = new("http://localhost:5020");
-    private readonly SampleClient _instance2 = new("http://localhost:5021");
-    private readonly DockerComposeFixture _fixture;
-
-    public LeaderElectionTests(DockerComposeFixture fixture)
+    [Fact]
+    public async Task Exactly_one_pod_leads_and_holds_the_Lease()
     {
-        _fixture = fixture;
+        var (leader, follower) = await cluster.SettledAsync();
+
+        var lease = await cluster.LeaseAsync();
+        Assert.NotNull(lease);
+        Assert.Equal(leader.Metadata.Name, lease.Spec.HolderIdentity);
+        Assert.Equal(leader.Metadata.Name, (await cluster.StatusAsync(leader)).Identity);
+        Assert.False((await cluster.StatusAsync(follower)).IsLeader);
+        Assert.Equal(11, lease.Spec.LeaseDurationSeconds); // ceil(10.5)
     }
 
     [Fact]
-    public async Task LeaderStatus_Endpoint_Returns200()
+    public async Task Demote_hands_the_Lease_over()
     {
-        var status = await _instance1.GetLeaderStatusAsync();
-        Assert.NotNull(status);
-        Assert.NotEqual(Guid.Empty, status.InstanceId);
+        var (leader, _) = await cluster.SettledAsync();
+        var transitions = (await cluster.LeaseAsync())!.Spec.LeaseTransitions ?? 0;
+
+        await cluster.PostAsync(leader, "demote");
+        var (next, took) = await cluster.NewLeaderAsync(leader.Metadata.Name, TimeSpan.FromSeconds(15));
+
+        var lease = await cluster.LeaseAsync();
+        Assert.Equal(next.Metadata.Name, lease!.Spec.HolderIdentity);
+        Assert.True(lease.Spec.LeaseTransitions > transitions);
+        Assert.True(took < TimeSpan.FromSeconds(5), $"handover took {took}"); // released, not expired
     }
 
     [Fact]
-    public async Task SingleLeader_AtAnyGivenTime()
+    public async Task An_unhealthy_leader_steps_down()
     {
-        // Allow election to settle
-        await Task.Delay(TimeSpan.FromSeconds(8));
+        var (leader, _) = await cluster.SettledAsync();
 
-        var s1 = await _instance1.GetLeaderStatusAsync();
-        var s2 = await _instance2.GetLeaderStatusAsync();
-
-        // Exactly one instance must be leader
-        var leaderCount = (s1.IsLeader ? 1 : 0) + (s2.IsLeader ? 1 : 0);
-        Assert.Equal(1, leaderCount);
-
-        // They must have different instance IDs
-        Assert.NotEqual(s1.InstanceId, s2.InstanceId);
-    }
-
-    [Fact]
-    public async Task LeaderReleased_OnStop_NextInstanceAcquires()
-    {
-        // Allow election to settle
-        await Task.Delay(TimeSpan.FromSeconds(8));
-
-        var s1Before = await _instance1.GetLeaderStatusAsync();
-        var s2Before = await _instance2.GetLeaderStatusAsync();
-
-        // Determine which instance is leader
-        string leaderService = s1Before.IsLeader ? "sample-1" : "sample-2";
-        SampleClient follower = s1Before.IsLeader ? _instance2 : _instance1;
-
-        // Stop the leader
-        _fixture.StopInstance(leaderService);
-
-        // Wait for follower to acquire (TTL is 15 s, loop is 5 s — allow up to 25 s)
-        var pipeline = new ResiliencePipelineBuilder<bool>()
-            .AddRetry(new Polly.Retry.RetryStrategyOptions<bool>
-            {
-                MaxRetryAttempts = 10,
-                Delay = TimeSpan.FromSeconds(3),
-                ShouldHandle = new PredicateBuilder<bool>()
-                    .Handle<Exception>()
-                    .HandleResult(r => !r),
-            })
-            .Build();
-
-        var followerBecameLeader = await pipeline.ExecuteAsync(async _ =>
+        await cluster.PostAsync(leader, "health/false");
+        try
         {
-            var status = await follower.GetLeaderStatusAsync();
-            return status.IsLeader;
-        }, CancellationToken.None);
-
-        Assert.True(followerBecameLeader, "Follower instance should become leader after leader stops.");
+            await cluster.NewLeaderAsync(leader.Metadata.Name, TimeSpan.FromSeconds(15));
+            var status = await cluster.StatusAsync(leader);
+            Assert.False(status.IsLeader);
+            Assert.False(status.IsHealthy);
+        }
+        finally
+        {
+            await cluster.PostAsync(leader, "health/true");
+        }
     }
 
     [Fact]
-    public async Task TransitionCount_IncreasesAfterLeaderChange()
+    public async Task Deleting_the_leader_pod_gracefully_hands_over_without_waiting_for_expiry()
     {
-        // This test verifies the counter increments across elections.
-        // Both instances must start fresh — this test is order-sensitive when run
-        // in the same docker-compose session; TransitionCount will be >= 1 if any
-        // previous test already triggered an election.
-        await Task.Delay(TimeSpan.FromSeconds(8));
+        var (leader, _) = await cluster.SettledAsync();
 
-        var s1 = await _instance1.GetLeaderStatusAsync();
-        var s2 = await _instance2.GetLeaderStatusAsync();
+        await cluster.Client.CoreV1.DeleteNamespacedPodAsync(leader.Metadata.Name, SampleCluster.Namespace);
+        var (_, took) = await cluster.NewLeaderAsync(leader.Metadata.Name, TimeSpan.FromSeconds(30));
 
-        var leader = s1.IsLeader ? s1 : s2;
-        Assert.True(leader.IsLeader);
+        Assert.True(took < SampleCluster.LeaseDuration, $"handover took {took}: the Lease wasn't released on shutdown");
+    }
 
-        // TransitionCount is embedded in the Redis key, not in the API response.
-        // This test asserts the system is consistent: instance IDs differ and one is leader.
-        Assert.NotEqual(s1.InstanceId, s2.InstanceId);
+    [Fact]
+    public async Task A_killed_leader_is_replaced_once_its_Lease_expires()
+    {
+        var (leader, _) = await cluster.SettledAsync();
+
+        await cluster.Client.CoreV1.DeleteNamespacedPodAsync(leader.Metadata.Name, SampleCluster.Namespace,
+            new V1DeleteOptions { GracePeriodSeconds = 0 });
+        var (_, took) = await cluster.NewLeaderAsync(leader.Metadata.Name, SampleCluster.LeaseDuration + TimeSpan.FromSeconds(20));
+
+        Assert.True(took < SampleCluster.LeaseDuration + TimeSpan.FromSeconds(10), $"handover took {took}");
     }
 }

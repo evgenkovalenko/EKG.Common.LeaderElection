@@ -3,6 +3,15 @@
   <Folder Name="/SolutionItems/">
     <File Path="nuget.config" />
     <File Path="README.md" />
+    <File Path="CHANGELOG.md" />
+    <File Path="Dockerfile" />
+    <File Path="Tiltfile" />
+    <File Path="k8s/sample.yaml" />
+    <File Path=".github/workflows/main.yml" />
+    <File Path=".github/workflows/pr.yml" />
+  </Folder>
+  <Folder Name="/Docs/">
+    <File Path="Docs/Migration-1.x-to-2.0.md" />
   </Folder>
   <Project Path="EKG.Common.LeaderElection.Sample/EKG.Common.LeaderElection.Sample.csproj" />
   <Project Path="EKG.Common.LeaderElection.Tests.Unit/EKG.Common.LeaderElection.Tests.Unit.csproj" />

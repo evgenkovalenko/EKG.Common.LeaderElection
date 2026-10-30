@@ -1,105 +1,182 @@
 # EKG.Common.LeaderElection
 
-Redis-backed leader election library for EKG services. Runs as a .NET hosted background service — one instance in a cluster holds the lock at any time.
+Leader election on a Kubernetes Lease for EKG services. Among the replicas of a service, at most one is the leader; it
+runs the leader-only work and hands it over when it stops, turns unhealthy or is demoted.
+
+Version 2.0 (PRM-78) follows the design of DraftKings.Feeds.LeaderElection, adapted to EKG: .NET 10, Microsoft.Extensions
+DI and hosting, no metrics. **1.0 (Redis) is still published** and used by Bonus and Jpe, which don't run on Kubernetes;
+see [the migration guide](Docs/Migration-1.x-to-2.0.md) and the [CHANGELOG](CHANGELOG.md).
 
 ## How it works
 
-Each application instance generates a unique `InstanceId` (GUID) on startup. Every 5 seconds the background loop either:
+Every instance runs an election cycle every `RenewalPeriod` (2 s) against one `coordination.k8s.io/v1` Lease:
 
-- **Renews** the lock if the current Redis key already belongs to this instance (extends TTL).
-- **Tries to acquire** using `SET NX` (set only if the key does not exist). Only one instance wins the race.
+1. **Health**: it asks its `ILeaderHealth` (within `HealthCheckTimeout`). An unhealthy instance doesn't compete, and an
+   unhealthy leader steps down.
+2. **The leader renews**: if the Lease is still its own and not expired, it writes a new `renewTime` (within
+   `RenewalTimeout`, Kubernetes calls retried). A failed or late renewal makes it step down.
+3. **A follower tries to acquire**: no Lease → create it; a Lease without a holder, or whose holder hasn't renewed for
+   the Lease's duration → take it over (`leaseTransitions + 1`). A live Lease is left alone.
+4. **Becoming the leader**: `OnLeadAcquire` handlers run (within `LeaderAcquisitionHandlerTimeout`), and only then does
+   `IsLeader` turn true.
+5. **Stepping down** (unhealthy, failed renewal, `DemoteAsync`, shutdown): `OnLeadRelease` handlers run (within
+   `LeaderDemotionHandlerTimeout`), then the Lease is released — its holder cleared and its times moved into the past, so
+   the next instance takes over at its next cycle instead of waiting for expiry.
 
-The Redis key stores a JSON value:
+Writes are optimistic: a replace carries the `resourceVersion` it read, so when two instances race, Kubernetes accepts one
+and rejects the other with 409.
 
-```json
+**The lease duration** is computed so the Lease can't expire while its holder is still renewing or releasing (split-brain):
+`max(RenewalPeriod × 2.5, (RenewalPeriod + HealthCheckTimeout + RenewalTimeout + LeaderDemotionHandlerTimeout) × 1.5)`,
+36 s with the defaults. A leader that is killed without releasing is replaced once its Lease expires.
+
+**Handler failures**: an `OnLeadAcquire` that throws demotes the instance (and `OnLeadRelease` runs to undo partial work).
+An `OnLeadAcquire` that times out — or, outside a shutdown, an `OnLeadRelease` that throws or times out — leaves the
+application in an unknown state: `LeaderHandlerTimeoutToken` is cancelled and the host stops the application.
+
+## Package
+
+```xml
+<PackageReference Include="EKG.Common.LeaderElection" Version="2.0.*" />
+```
+
+## Registration
+
+```csharp
+builder.Services.AddLeaderElection(builder.Configuration);                 // every instance healthy
+builder.Services.AddLeaderElection<MyLeaderHealth>(builder.Configuration); // or: your health rule
+```
+
+The host starts the election on `ApplicationStarted` (every singleton that subscribes is built by then) and stops it on
+`ApplicationStopping` — before the other hosted services stop — so a leader releases the Lease on a graceful shutdown.
+Invalid options fail the host's start.
+
+## Usage
+
+```csharp
+public sealed class MyWorker(ILeaderElection leader) : BackgroundService
 {
-  "holderId": "...",
-  "transitionCount": 3,
-  "renewTime": "2025-01-01T12:00:05Z",
-  "acquireTime": "2025-01-01T12:00:00Z"
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (leader.IsLeader)
+                await DoLeaderOnlyWorkAsync(stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+        }
+    }
 }
 ```
 
-| Field | Description |
+Or react to the transitions (optional; both handlers may be left out):
+
+```csharp
+leader.OnLeadAcquire += async e =>
+{
+    e.Journal.Add("starting the consumer");
+    await consumer.StartAsync(e.CancellationToken);
+};
+leader.OnLeadRelease += async e =>
+{
+    await consumer.StopAsync();
+};
+```
+
+| Member | |
 |---|---|
-| `holderId` | GUID of the current leader instance |
-| `transitionCount` | Incremented each time a new instance becomes leader |
-| `renewTime` | Updated on every loop iteration by the current leader |
-| `acquireTime` | Set when this `holderId` first acquired leadership |
-
-On graceful shutdown the leader deletes the key immediately, allowing the next election to happen before the TTL expires.
-
-## Redis key format
-
-```
-leader-election:{AppName}
-```
-
-Example: `leader-election:EKG.App.Jpe.BE`
-
-## Packages
-
-```xml
-<PackageReference Include="EKG.Common.LeaderElection" Version="1.0.*" />
-```
-
-Requires `EKG.Common.Cache.Redis` to register `IConnectionMultiplexer` first.
+| `IsLeader` | True once `OnLeadAcquire` completed, until the step-down starts. |
+| `IsHealthy` | The last `ILeaderHealth` answer. |
+| `Identity` | The holder identity written to the Lease: the pod name (`HOSTNAME`). |
+| `LeaderHandlerTimeoutToken` | Cancelled when a handler failed fatally (see above). |
+| `DemoteAsync()` | Step down now; the instance keeps competing. |
+| `LeaderElectionEventArgs.Journal` | Notes logged as one entry after the handlers. |
 
 ## Configuration
 
 ```json
 {
-  "Redis": {
-    "ConnectionString": "redis://localhost:6379"
-  },
   "LeaderElection": {
-    "TtlSeconds": 15,
-    "AppName": "EKG.App.Jpe.BE"
+    "LockName": "prediction-tradeapi-funds"
   }
 }
 ```
 
-| Key | Default | Description |
+| Key | Default | |
 |---|---|---|
-| `LeaderElection:TtlSeconds` | `15` | Redis key TTL in seconds |
-| `LeaderElection:AppName` | _(required)_ | Included in the Redis key to scope per application |
+| `LockName` | *(required)* | The Lease's name; lowercased, must be a DNS-1123 subdomain. |
+| `Namespace` | the pod's namespace | |
+| `Enabled` | `true` | `false`: no Kubernetes; the Lease lives in the process, so a single instance always leads (while healthy). For docker-compose and local runs. |
+| `KubeContext` | — | Outside a cluster, the kubeconfig context to use (e.g. `kind-leader-election`). **Required there**: the current context is never used implicitly, so a local run can't take a Lease in a shared cluster. |
+| `RenewalPeriod` | `00:00:02` | Time between cycles. |
+| `RenewalTimeout` | `00:00:10` | Bound on one acquire / renew, retries included. |
+| `HealthCheckTimeout` | `00:00:02` | |
+| `LeaderAcquisitionHandlerTimeout` | `00:00:10` | |
+| `LeaderDemotionHandlerTimeout` | `00:00:10` | |
+| `KubernetesApiRetryDelay` / `KubernetesApiMaxRetryDelay` | `00:00:00.100` / `00:00:02` | Exponential backoff. Transient failures (network, timeouts, 408, 5xx) are retried as many times as fit in `RenewalTimeout` minus 1 s (7 with the defaults). |
 
-## Registration
+The 1.0 keys `AppName` and `TtlSeconds` are ignored (a warning is logged when present).
 
-```csharp
-builder.Services.AddRedisCache(builder.Configuration);     // registers IConnectionMultiplexer
-builder.Services.AddLeaderElection(builder.Configuration); // registers leader election
+## Kubernetes RBAC
+
+The pod's ServiceAccount needs `get`, `create` and `update` on Leases in its namespace:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-service
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: my-service-leases
+rules:
+  - apiGroups: ['coordination.k8s.io']
+    resources: ['leases']
+    verbs: ['get', 'create', 'update']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: my-service-leases
+subjects:
+  - kind: ServiceAccount
+    name: my-service
+roleRef:
+  kind: Role
+  name: my-service-leases
+  apiGroup: rbac.authorization.k8s.io
 ```
 
-## Usage
-
-```csharp
-public class MyService(ILeaderElectionService leaderElection)
-{
-    public void DoWork()
-    {
-        if (!leaderElection.IsLeader)
-            return; // only the leader does the work
-
-        // ...
-    }
-}
-```
+…and the Deployment sets `serviceAccountName: my-service`. Without it every cycle logs "Forbidden to get Lease …". Check
+who leads with `kubectl get lease <LockName> -o yaml` (`spec.holderIdentity` is the pod).
 
 ## Running tests
 
-**Unit tests** (no external dependencies):
+**Unit tests** (no dependencies; two electors on an in-memory Lease, fake time):
+
 ```bash
 dotnet test EKG.Common.LeaderElection.Tests.Unit
 ```
 
-**E2E tests** (requires Docker / Rancher Desktop):
+**E2E tests** (the sample, two replicas, on a local kind cluster; requires Docker, kind and Tilt):
+
 ```bash
-dotnet test EKG.Common.LeaderElection.Tests.E2E
+kind create cluster --name leader-election
+tilt up --context kind-leader-election
+dotnet test EKG.Common.LeaderElection.Tests.E2E   # LE_E2E_CONTEXT, default kind-leader-election
+tilt down
 ```
 
-The E2E fixture starts `docker compose up --build -d` automatically (Redis + 2× Sample app instances) and tears down on completion.
+The Tiltfile and the tests refuse any context that isn't `kind-*`: they create Leases and delete pods. They check one
+leader that holds the Lease, handover on `/demote`, an unhealthy leader stepping down, a graceful pod delete handing over
+before expiry, and a killed leader replaced once its Lease expires.
+
+**The sample locally** (`dotnet run --project EKG.Common.LeaderElection.Sample`) runs with `Enabled=false`
+(launchSettings): `GET /leader-status`, `POST /demote`, `POST /health/false|true`.
 
 ## Publishing
 
-Pushing any commit to `main` triggers the GitHub Actions workflow, which builds and publishes the `EKG.Common.LeaderElection` package to GitHub Packages. Version scheme: `{major}.{minor}.{run_number}`.
+Every push to `main` publishes the package to GitHub Packages as `{major}.{minor}.{run_number}` (from `<Version>` in the
+csproj: `2.0.N`). Pull requests build and run the unit tests (`pr.yml`). A fix to 1.0 goes on a `release/1.x` branch cut
+from the last 1.0 commit.

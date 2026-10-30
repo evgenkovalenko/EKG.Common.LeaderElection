@@ -8,10 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="EKG.Common.Cache.Redis" Version="1.0.*" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\EKG.Common.LeaderElection\EKG.Common.LeaderElection.csproj" />
   </ItemGroup>
 
